@@ -61,7 +61,9 @@ Return ONLY one exact label: DELIVERY ORDER or GOODS TRANSFER NOTE.
 const app = express();
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 15 * 1024 * 1024, files: 1 },
+  // Vercel Functions have a fixed 4.5 MB request payload limit. Leave room
+  // for multipart headers instead of allowing Vercel to return an opaque 413.
+  limits: { fileSize: 4 * 1024 * 1024, files: 1 },
   fileFilter: (_request, file, callback) => {
     if (!file.mimetype.startsWith("image/")) {
       return callback(new Error("Only image files are accepted."));
@@ -210,3 +212,4 @@ if (isMainModule) {
 }
 
 export { app, extractJson, normalizeResult };
+export default app;
