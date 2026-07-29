@@ -13,7 +13,7 @@
     "deploy:prod": "vercel --prod"
   },
   "engines": {
-    "node": ">=20"
+    "node": "20.x"
   },
   "dependencies": {
     "express": "^5.1.0",
