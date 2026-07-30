@@ -8,6 +8,7 @@
   "scripts": {
     "start": "node app.js",
     "dev": "node --watch app.js",
+    "batch": "node --watch batch.js",
     "test": "node --test",
     "deploy": "vercel",
     "deploy:prod": "vercel --prod"
