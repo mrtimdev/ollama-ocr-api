@@ -89,3 +89,14 @@ Vercel Functions accept request payloads up to 4.5 MB. This API limits the
 uploaded image to 4 MB to leave room for multipart headers. For larger images,
 resize/compress them before uploading or upload them directly to object storage
 and change the API to accept a file URL.
+
+
+cd ~/node-js-ocr-api
+npm ci --omit=dev
+
+sudo mkdir -p /etc/node-js-ocr-api
+
+sudo nano /etc/node-js-ocr-api/environment
+
+sudo chmod 600 /etc/node-js-ocr-api/environment
+sudo chown deverloper:deverloper /etc/node-js-ocr-api/environment
