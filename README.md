@@ -55,9 +55,52 @@ curl -X POST "http://localhost:3000/api/v1/ocr/batch" \
   -F "files=@/path/to/second.jpg"
 ```
 
+Spring workers should use wait mode so the HTTP response contains the completed
+results that are written back to each scan:
+
+```text
+http://localhost:3000/api/v1/ocr/single?wait=true
+```
+
+Set each Spring AI provider's `baseUrl` directly to the desired endpoint, such
+as `http://127.0.0.1:3000/api/v1/ocr/batch` (do not save an `apiKey` query
+parameter in the base URL). The provider's stored API key is sent as the
+`apiKey` header, while `app.ocr.access-key` is sent
+separately in the `X-API-Key` header. Spring sends up to
+`app.queue.batch-size` files. Keep
+`MAX_BATCH_SIZE` on this service greater than or equal to Spring's batch size
+(the default for both is 5).
+
 Open `http://localhost:3000/monitor`. When `MONITOR_API_KEY` is configured, use
 the **Monitor access** button to connect. The dashboard receives job metadata
 only; OCR results, image buffers, and credentials are not broadcast.
+
+The monitor accepts the dedicated `MONITOR_API_KEY` or any key configured in
+`API_KEYS`/`SPRING_API_KEYS`. Monitoring REST calls may send the key in
+`X-Monitor-Key`, `X-API-Key`, or `Authorization: Bearer ...`.
+
+Spring-originated requests include scan IDs, their Redis queue name, and the
+selected provider ID as monitor metadata. User uploads also preserve their
+originating Spring action (`/api/scans`) in that metadata. A dedicated
+`MONITOR_API_KEY` can view all jobs; a regular `X-API-Key` can view and manage
+only jobs created with the same key. The monitor actions are:
+
+- **Retry** — securely calls Spring and requeues the scans in Spring Redis.
+- **Delete** — removes only the Node monitor-history record.
+- **More** — displays job, Spring scan, queue, provider, timing, and error data.
+
+Configure the callback when Spring is not running on the default local port:
+
+```env
+SPRING_MONITOR_ACTION_URL=http://127.0.0.1:8083/api/internal/ocr-monitor/actions
+SPRING_BASE_URL=http://127.0.0.1:8083
+SPRING_ACTION_KEY=KEY_FOR_TIM
+```
+
+`SPRING_ACTION_KEY` must match Spring's `app.ocr.access-key`/`OCR_ACCESS_KEY`.
+When Spring uses the default `127.0.0.1:8083`, the callback variables are
+optional. The monitor proxies linked scan details and images through the Node
+API, so the Spring action key is never exposed to the browser.
 
 ## Queue behavior
 

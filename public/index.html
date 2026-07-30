@@ -57,6 +57,9 @@
           <p id="queue-meta" class="mt-0.5 text-xs text-slate-500">Waiting for queue data</p>
         </div>
         <div class="flex gap-2">
+          <button id="bulk-more-button" disabled class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-300 disabled:opacity-40 hover:bg-white/10">More</button>
+          <button id="bulk-retry-button" disabled class="rounded-lg border border-cyan-400/20 bg-cyan-400/5 px-3 py-2 text-sm text-cyan-300 disabled:opacity-40 hover:bg-cyan-400/10">Retry selected</button>
+          <button id="bulk-delete-button" disabled class="rounded-lg border border-rose-400/20 bg-rose-400/5 px-3 py-2 text-sm text-rose-300 disabled:opacity-40 hover:bg-rose-400/10">Delete selected</button>
           <select id="status-filter" class="rounded-lg border border-white/10 bg-slate-950 px-3 py-2 text-sm text-slate-300 outline-none focus:border-cyan-400/60">
             <option value="all">All statuses</option>
             <option value="queued">Queued</option>
@@ -72,6 +75,7 @@
         <table class="w-full min-w-[860px] text-left text-sm">
           <thead class="bg-white/[0.025] text-xs uppercase tracking-wider text-slate-500">
             <tr>
+              <th class="px-5 py-3 font-medium"><input id="select-all-jobs" type="checkbox" class="h-4 w-4 rounded border-white/20 bg-slate-950"></th>
               <th class="px-5 py-3 font-medium">Request</th>
               <th class="px-5 py-3 font-medium">User</th>
               <th class="px-5 py-3 font-medium">Files</th>
@@ -79,6 +83,7 @@
               <th class="px-5 py-3 font-medium">Progress</th>
               <th class="px-5 py-3 font-medium">Created</th>
               <th class="px-5 py-3 font-medium">Duration</th>
+              <th class="px-5 py-3 font-medium">Actions</th>
             </tr>
           </thead>
           <tbody id="jobs-body" class="divide-y divide-white/[0.06]"></tbody>
@@ -91,6 +96,16 @@
       </div>
     </section>
   </main>
+
+  <dialog id="job-dialog" class="m-auto w-[calc(100%-2rem)] max-w-2xl rounded-2xl border border-white/10 bg-slate-900 p-0 text-slate-100 shadow-2xl backdrop:bg-black/70">
+    <div class="p-6">
+      <div class="flex items-center justify-between gap-4">
+        <h2 class="text-lg font-semibold">OCR request details</h2>
+        <button id="close-job-dialog" type="button" class="rounded-lg border border-white/10 px-3 py-1.5 text-sm text-slate-300 hover:bg-white/5">Close</button>
+      </div>
+      <div id="job-details" class="mt-5 max-h-[70vh] space-y-4 overflow-auto"></div>
+    </div>
+  </dialog>
 
   <dialog id="access-dialog" class="m-auto w-[calc(100%-2rem)] max-w-md rounded-2xl border border-white/10 bg-slate-900 p-0 text-slate-100 shadow-2xl backdrop:bg-black/70">
     <form id="access-form" class="p-6">

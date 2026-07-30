@@ -61,3 +61,19 @@ test("job queue processes work and returns the result", async () => {
   assert.equal(finished.progress, 100);
   assert.deepEqual(finished.result, { success: true, value: 42 });
 });
+
+test("job queue exposes Spring metadata and deletes monitor history", async () => {
+  const queue = new JobQueue({ concurrency: 1 });
+  const created = queue.add({
+    type: "batch",
+    owner: { name: "spring", keyId: "spring123" },
+    filenames: ["invoice.jpg"],
+    fileCount: 1,
+    metadata: { source: "spring-redis", scanIds: [42], queueName: "ops_user_1_ai-ocr", providerId: 7 },
+    run: async () => ({ success: true }),
+  });
+  const finished = await queue.waitFor(created.id);
+  assert.deepEqual(finished.metadata.scanIds, [42]);
+  assert.equal(queue.delete(created.id), true);
+  assert.equal(queue.get(created.id), null);
+});

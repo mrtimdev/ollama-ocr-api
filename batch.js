@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
 import { Server as SocketIOServer } from "socket.io";
-import { requireApiKey, requireMonitorKey, isMonitorKeyValid } from "./auth.js";
+import { authenticateMonitorKey, requireApiKey, requireMonitorKey } from "./auth.js";
 import { JobQueue } from "./queue.js";
 
 const MODEL_NAME = process.env.OLLAMA_MODEL || "gemma4:31b-cloud";
@@ -23,6 +23,7 @@ const REQUIRED_FIELDS = [
     "vendorCode",
     "vehicleCode",
 ];
+const VEHICLE_CODE_PATTERN = /(?<![A-Z0-9])([A-Z0-9]{2}-[A-Z0-9]{4})(?![A-Z0-9])/i;
 
 const DELIVERY_ORDER_PROMPT = `
 Extract KHB DELIVERY ORDER fields and return ONLY valid JSON:
@@ -211,11 +212,28 @@ function parseJSONResponse(text) {
     return JSON.parse(cleaned);
 }
 
+function normalizeResult(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+        throw new Error("Model output is not a JSON object.");
+    }
+
+    const normalized = Object.fromEntries(
+        REQUIRED_FIELDS.map((field) => [field, data[field] == null ? "" : String(data[field]).trim()])
+    );
+    const date = normalized.invoiceDate.match(/^(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{4})$/);
+    if (date) {
+        normalized.invoiceDate = `${ date[1].padStart(2, "0") }-${ date[2].padStart(2, "0") }-${ date[3] }`;
+    }
+    const vehicle = normalized.vehicleCode.toUpperCase().match(VEHICLE_CODE_PATTERN);
+    normalized.vehicleCode = vehicle?.[1] || "";
+    return normalized;
+}
+
 async function extractDocument(apiKey, imageBase64, template, customPrompt) {
     const templatePrompt =
         template === "GOODS TRANSFER NOTE" ? GOODS_TRANSFER_NOTE_PROMPT : DELIVERY_ORDER_PROMPT;
     const output = await chatWithImage(apiKey, imageBase64, buildPrompt(customPrompt, templatePrompt));
-    return parseJSONResponse(output);
+    return normalizeResult(parseJSONResponse(output));
 }
 
 async function extractMultipleDocuments(apiKey, imagesBase64, templates, customPrompts) {
@@ -231,7 +249,7 @@ async function extractMultipleDocuments(apiKey, imagesBase64, templates, customP
         throw new Error(`Expected ${ imagesBase64.length } results, got ${ results?.length || 0 }`);
     }
 
-    return results;
+    return results.map(normalizeResult);
 }
 
 function parseCustomPrompts(value) {
@@ -244,11 +262,92 @@ function parseCustomPrompts(value) {
     }
 }
 
-function ollamaKey() {
-    if (!process.env.OLLAMA_API_KEY) {
-        throw new Error("OLLAMA_API_KEY is not configured on the server.");
+function parseSpringMetadata(body) {
+    let scanIds = [];
+    try {
+        const parsed = JSON.parse(body?.springScanIds || "[]");
+        scanIds = Array.isArray(parsed) ? parsed.map(Number).filter(Number.isFinite) : [];
+    } catch {
+        scanIds = [];
     }
-    return process.env.OLLAMA_API_KEY;
+    if (!scanIds.length) return null;
+    const providerId = Number(body?.springProviderId);
+    return {
+        source: "spring-redis",
+        scanIds,
+        username: String(body?.springUsername || ""),
+        action: String(body?.springAction || ""),
+        queueName: String(body?.springQueueName || ""),
+        providerId: Number.isFinite(providerId) ? providerId : null,
+    };
+}
+
+function springActionUrl() {
+    return process.env.SPRING_MONITOR_ACTION_URL?.trim()
+        || `${ springBaseUrl() }/api/internal/ocr-monitor/actions`;
+}
+
+function springBaseUrl() {
+    return (process.env.SPRING_BASE_URL?.trim() || "http://127.0.0.1:8083").replace(/\/$/, "");
+}
+
+function springActionHeaders() {
+    return { "X-Monitor-Action-Key": process.env.SPRING_ACTION_KEY || "KEY_FOR_TIM" };
+}
+
+async function requestSpringAction(job, action) {
+    if (!job?.metadata?.scanIds?.length) {
+        throw new Error("This OCR request is not linked to Spring scans.");
+    }
+    const response = await fetch(springActionUrl(), {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            ...springActionHeaders(),
+        },
+        body: JSON.stringify({
+            action,
+            scanIds: job.metadata.scanIds,
+            providerId: job.metadata.providerId,
+            queueName: job.metadata.queueName,
+            ocrJobId: job.id,
+        }),
+        signal: AbortSignal.timeout(15_000),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(result.message || result.error || `Spring action failed (${ response.status }).`);
+    }
+    return result;
+}
+
+async function requestSpringScan(scanId, suffix = "") {
+    const response = await fetch(
+        `${ springBaseUrl() }/api/internal/ocr-monitor/scans/${ encodeURIComponent(scanId) }${ suffix }`,
+        {
+            headers: springActionHeaders(),
+            signal: AbortSignal.timeout(15_000),
+        },
+    );
+    if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.message || result.error || `Spring scan request failed (${ response.status }).`);
+    }
+    return response;
+}
+
+function ollamaKey(request) {
+    // Prefer the request header. Provider base URLs are often copied with an old
+    // apiKey query parameter, while Spring always sends the current stored key
+    // in this header.
+    const apiKey = request?.get?.("apiKey")
+        || request?.get?.("x-provider-api-key")
+        || request?.query?.apiKey
+        || process.env.OLLAMA_API_KEY;
+    if (!apiKey) {
+        throw new Error("The provider apiKey query parameter is required (or set OLLAMA_API_KEY).");
+    }
+    return String(apiKey).trim();
 }
 
 function jobResponse(job) {
@@ -263,6 +362,13 @@ function canReadJob(request, job) {
     return job && request.apiUser?.keyId === job.ownerId;
 }
 
+function monitorJobs(request) {
+    const jobs = queue.list();
+    return request.monitorAccess?.scope === "monitor"
+        ? jobs
+        : jobs.filter((job) => job.ownerId === request.monitorAccess?.user?.keyId);
+}
+
 async function sendQueuedResponse(request, response, job) {
     if (request.query.wait !== "true") {
         response.set("Location", `/api/v1/jobs/${ job.id }`);
@@ -274,16 +380,39 @@ async function sendQueuedResponse(request, response, job) {
 }
 
 io.use((socket, next) => {
-    const key = socket.handshake.auth?.monitorKey || "";
-    if (!isMonitorKeyValid(key)) return next(new Error("unauthorized"));
+    const authorization = socket.handshake.headers?.authorization || "";
+    const bearerKey = authorization.toLowerCase().startsWith("bearer ")
+        ? authorization.slice(7).trim()
+        : "";
+    const key = socket.handshake.auth?.monitorKey
+        || socket.handshake.auth?.apiKey
+        || socket.handshake.headers?.["x-monitor-key"]
+        || socket.handshake.headers?.["x-api-key"]
+        || socket.handshake.query?.monitorKey
+        || socket.handshake.query?.apiKey
+        || bearerKey
+        || "";
+    const access = authenticateMonitorKey(key);
+    if (!access) return next(new Error("unauthorized"));
+    socket.monitorAccess = access;
     next();
 });
 
 io.on("connection", (socket) => {
-    socket.emit("monitor:snapshot", { jobs: queue.list(), stats: queue.stats() });
+    const jobs = socket.monitorAccess?.scope === "monitor"
+        ? queue.list()
+        : queue.list().filter((job) => job.ownerId === socket.monitorAccess?.user?.keyId);
+    socket.emit("monitor:snapshot", { jobs, stats: queue.stats() });
 });
 
-queue.on("updated", (job) => io.emit("job:updated", job));
+queue.on("updated", (job) => {
+    for (const socket of io.sockets.sockets.values()) {
+        if (socket.monitorAccess?.scope === "monitor"
+            || socket.monitorAccess?.user?.keyId === job.ownerId) {
+            socket.emit("job:updated", job);
+        }
+    }
+});
 queue.on("stats", (stats) => io.emit("queue:stats", stats));
 queue.on("removed", (id) => io.emit("job:removed", id));
 
@@ -325,8 +454,79 @@ app.get("/api/v1/jobs/:id", requireApiKey, (request, response) => {
     response.json(jobResponse(job));
 });
 
-app.get("/api/v1/monitor/jobs", requireMonitorKey, (_request, response) => {
-    response.json({ success: true, jobs: queue.list(), stats: queue.stats() });
+app.get("/api/v1/monitor/jobs", requireMonitorKey, (request, response) => {
+    response.json({ success: true, jobs: monitorJobs(request), stats: queue.stats() });
+});
+
+app.get("/api/v1/monitor/jobs/:id/scans", requireMonitorKey, async (request, response, next) => {
+    try {
+        const job = queue.get(request.params.id);
+        if (!job || (request.monitorAccess?.scope !== "monitor"
+            && job.ownerId !== request.monitorAccess?.user?.keyId)) {
+            return response.status(404).json({ success: false, error: "Job not found." });
+        }
+        const scans = await Promise.all(
+            (job.metadata?.scanIds || []).map(async (scanId) =>
+                requestSpringScan(scanId).then((springResponse) => springResponse.json())),
+        );
+        return response.json({ success: true, scans });
+    } catch (error) {
+        next(error);
+    }
+});
+
+app.get("/api/v1/monitor/jobs/:id/scans/:scanId/image", requireMonitorKey, async (request, response, next) => {
+    try {
+        const job = queue.get(request.params.id);
+        const scanId = Number(request.params.scanId);
+        if (!job || !job.metadata?.scanIds?.includes(scanId)
+            || (request.monitorAccess?.scope !== "monitor"
+                && job.ownerId !== request.monitorAccess?.user?.keyId)) {
+            return response.status(404).json({ success: false, error: "Scan image not found." });
+        }
+        const springResponse = await requestSpringScan(scanId, "/image");
+        response.set("Content-Type", springResponse.headers.get("content-type") || "application/octet-stream");
+        response.set("Cache-Control", "private, no-store");
+        return response.send(Buffer.from(await springResponse.arrayBuffer()));
+    } catch (error) {
+        next(error);
+    }
+});
+
+app.post("/api/v1/monitor/jobs/:id/retry", requireMonitorKey, async (request, response, next) => {
+    try {
+        const job = queue.get(request.params.id);
+        if (!job || (request.monitorAccess?.scope !== "monitor"
+            && job.ownerId !== request.monitorAccess?.user?.keyId)) {
+            return response.status(404).json({ success: false, error: "Job not found." });
+        }
+        if (!["completed", "failed"].includes(job.status)) {
+            return response.status(409).json({ success: false, error: "Only completed or failed requests can be retried." });
+        }
+        queue.setActionStatus(job.id, "Sending retry to Spring Redis");
+        const result = await requestSpringAction(job, "retry");
+        queue.setActionStatus(job.id, `Retry queued (${ result.queued || 0 })`);
+        return response.json({ success: true, result });
+    } catch (error) {
+        queue.setActionStatus(request.params.id, `Retry failed: ${ error.message }`);
+        next(error);
+    }
+});
+
+app.delete("/api/v1/monitor/jobs/:id", requireMonitorKey, (request, response) => {
+    try {
+        const job = queue.get(request.params.id);
+        if (!job || (request.monitorAccess?.scope !== "monitor"
+            && job.ownerId !== request.monitorAccess?.user?.keyId)) {
+            return response.status(404).json({ success: false, error: "Job not found." });
+        }
+        if (!queue.delete(request.params.id)) {
+            return response.status(404).json({ success: false, error: "Job not found." });
+        }
+        return response.json({ success: true });
+    } catch (error) {
+        return response.status(409).json({ success: false, error: error.message });
+    }
 });
 
 app.post("/api/v1/ocr/single", requireApiKey, upload.single("file"), async (request, response, next) => {
@@ -338,13 +538,15 @@ app.post("/api/v1/ocr/single", requireApiKey, upload.single("file"), async (requ
         const imageBase64 = request.file.buffer.toString("base64");
         const filename = request.file.originalname;
         const customPrompt = request.body?.customPrompt;
+        const providerApiKey = ollamaKey(request);
         const job = queue.add({
             type: "single",
             owner: request.apiUser,
             filenames: [filename],
             fileCount: 1,
+            metadata: parseSpringMetadata(request.body),
             run: async (progress) => {
-                const apiKey = ollamaKey();
+                const apiKey = providerApiKey;
                 const template = await filterImageTemplate(apiKey, imageBase64);
                 progress(50);
                 const data = await extractDocument(apiKey, imageBase64, template, customPrompt);
@@ -386,13 +588,15 @@ app.post("/api/v1/ocr/batch", requireApiKey, upload.array("files", MAX_BATCH_SIZ
         const customPrompts = parseCustomPrompts(request.body?.customPrompts);
         const imagesBase64 = files.map(file => file.buffer.toString("base64"));
         const filenames = files.map((file) => file.originalname);
+        const providerApiKey = ollamaKey(request);
         const job = queue.add({
             type: "batch",
             owner: request.apiUser,
             filenames,
             fileCount: files.length,
+            metadata: parseSpringMetadata(request.body),
             run: async (progress) => {
-                const apiKey = ollamaKey();
+                const apiKey = providerApiKey;
                 const templates = await filterMultipleImageTemplates(apiKey, imagesBase64);
                 progress(50);
                 const dataArray = await extractMultipleDocuments(apiKey, imagesBase64, templates, customPrompts);
@@ -434,12 +638,12 @@ const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(proces
 
 if (isMainModule) {
     httpServer.listen(PORT, "0.0.0.0", () => {
-        console.log(`OCR API listening on http://0.0.0.0:${ PORT }`);
-        console.log(`Monitoring UI: http://0.0.0.0:${ PORT }/monitor`);
+        console.log(`OCR API listening on http://127.0.0.1:${ PORT }`);
+        console.log(`Monitoring UI: http://127.0.0.1:${ PORT }/monitor`);
         console.log(`Max batch size: ${ MAX_BATCH_SIZE }`);
         console.log(`Queue concurrency: ${ QUEUE_CONCURRENCY }`);
     });
 }
 
-export { app, httpServer, io, parseJSONResponse, queue };
+export { app, httpServer, io, normalizeResult, parseJSONResponse, queue };
 export default app;

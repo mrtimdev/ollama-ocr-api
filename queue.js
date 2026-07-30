@@ -11,7 +11,7 @@ class JobQueue extends EventEmitter {
     this.active = 0;
   }
 
-  add({ type, owner, filenames, fileCount, run }) {
+  add({ type, owner, filenames, fileCount, metadata = null, run }) {
     const now = new Date().toISOString();
     const job = {
       id: randomUUID(),
@@ -27,6 +27,8 @@ class JobQueue extends EventEmitter {
       durationMs: null,
       result: null,
       error: null,
+      metadata,
+      actionStatus: null,
       run,
     };
     this.jobs.set(job.id, job);
@@ -82,6 +84,27 @@ class JobQueue extends EventEmitter {
     return job ? this.publicJob(job, true) : null;
   }
 
+  delete(id) {
+    const job = this.jobs.get(id);
+    if (!job) return false;
+    if (!["completed", "failed"].includes(job.status)) {
+      throw new Error("Only completed or failed monitor records can be deleted.");
+    }
+    this.pending = this.pending.filter((pendingId) => pendingId !== id);
+    this.jobs.delete(id);
+    this.emit("removed", id);
+    this.emit("stats", this.stats());
+    return true;
+  }
+
+  setActionStatus(id, actionStatus) {
+    const job = this.jobs.get(id);
+    if (!job) return null;
+    job.actionStatus = actionStatus;
+    this.emitState(job);
+    return this.publicJob(job);
+  }
+
   list() {
     return [...this.jobs.values()]
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -135,6 +158,8 @@ class JobQueue extends EventEmitter {
       completedAt: job.completedAt,
       durationMs: job.durationMs,
       error: job.error,
+      metadata: job.metadata,
+      actionStatus: job.actionStatus,
     };
     if (includeResult) output.result = job.result;
     return output;
