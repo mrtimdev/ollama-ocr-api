@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OCR Queue Monitor</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-100 antialiased">
+  <div class="pointer-events-none fixed inset-0 overflow-hidden">
+    <div class="absolute -left-40 top-0 h-96 w-96 rounded-full bg-cyan-500/10 blur-3xl"></div>
+    <div class="absolute right-0 top-40 h-96 w-96 rounded-full bg-violet-500/10 blur-3xl"></div>
+  </div>
+
+  <main class="relative mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+    <header class="mb-8 flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <div class="mb-3 flex items-center gap-2">
+          <span id="connection-dot" class="h-2.5 w-2.5 rounded-full bg-amber-400"></span>
+          <span id="connection-label" class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">Connecting</span>
+        </div>
+        <h1 class="text-3xl font-semibold tracking-tight text-white sm:text-4xl">OCR request monitor</h1>
+        <p class="mt-2 max-w-2xl text-sm text-slate-400">Live queue activity, processing progress, and request outcomes.</p>
+      </div>
+      <button id="access-button" class="rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-medium text-slate-200 transition hover:border-cyan-400/40 hover:bg-cyan-400/10">
+        Monitor access
+      </button>
+    </header>
+
+    <section class="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-5">
+      <article class="stat-card">
+        <p class="stat-label">Total</p>
+        <p id="stat-total" class="stat-value">0</p>
+      </article>
+      <article class="stat-card">
+        <p class="stat-label">Queued</p>
+        <p id="stat-queued" class="stat-value text-amber-300">0</p>
+      </article>
+      <article class="stat-card">
+        <p class="stat-label">Processing</p>
+        <p id="stat-processing" class="stat-value text-cyan-300">0</p>
+      </article>
+      <article class="stat-card">
+        <p class="stat-label">Completed</p>
+        <p id="stat-completed" class="stat-value text-emerald-300">0</p>
+      </article>
+      <article class="stat-card col-span-2 lg:col-span-1">
+        <p class="stat-label">Failed</p>
+        <p id="stat-failed" class="stat-value text-rose-300">0</p>
+      </article>
+    </section>
+
+    <section class="overflow-hidden rounded-2xl border border-white/10 bg-slate-900/60 shadow-2xl shadow-black/20 backdrop-blur">
+      <div class="flex flex-col gap-3 border-b border-white/10 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 class="font-semibold text-white">Requests</h2>
+          <p id="queue-meta" class="mt-0.5 text-xs text-slate-500">Waiting for queue data</p>
+        </div>
+        <div class="flex gap-2">
+          <select id="status-filter" class="rounded-lg border border-white/10 bg-slate-950 px-3 py-2 text-sm text-slate-300 outline-none focus:border-cyan-400/60">
+            <option value="all">All statuses</option>
+            <option value="queued">Queued</option>
+            <option value="processing">Processing</option>
+            <option value="completed">Completed</option>
+            <option value="failed">Failed</option>
+          </select>
+          <button id="refresh-button" class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-300 hover:bg-white/10">Refresh</button>
+        </div>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full min-w-[860px] text-left text-sm">
+          <thead class="bg-white/[0.025] text-xs uppercase tracking-wider text-slate-500">
+            <tr>
+              <th class="px-5 py-3 font-medium">Request</th>
+              <th class="px-5 py-3 font-medium">User</th>
+              <th class="px-5 py-3 font-medium">Files</th>
+              <th class="px-5 py-3 font-medium">Status</th>
+              <th class="px-5 py-3 font-medium">Progress</th>
+              <th class="px-5 py-3 font-medium">Created</th>
+              <th class="px-5 py-3 font-medium">Duration</th>
+            </tr>
+          </thead>
+          <tbody id="jobs-body" class="divide-y divide-white/[0.06]"></tbody>
+        </table>
+      </div>
+      <div id="empty-state" class="px-5 py-16 text-center">
+        <div class="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-white/5 text-xl">↗</div>
+        <p class="font-medium text-slate-300">No requests yet</p>
+        <p class="mt-1 text-sm text-slate-500">New OCR jobs will appear here in real time.</p>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="access-dialog" class="m-auto w-[calc(100%-2rem)] max-w-md rounded-2xl border border-white/10 bg-slate-900 p-0 text-slate-100 shadow-2xl backdrop:bg-black/70">
+    <form id="access-form" class="p-6">
+      <h2 class="text-lg font-semibold">Monitor access</h2>
+      <p class="mt-1 text-sm text-slate-400">Enter the server’s monitoring key. It is kept only in this browser.</p>
+      <label class="mt-5 block text-xs font-semibold uppercase tracking-wider text-slate-400" for="monitor-key">Monitor key</label>
+      <input id="monitor-key" type="password" autocomplete="current-password" class="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-3.5 py-3 text-sm outline-none focus:border-cyan-400/70" placeholder="Leave blank if access is open">
+      <p id="access-error" class="mt-2 hidden text-sm text-rose-300">The monitor key was rejected.</p>
+      <div class="mt-6 flex justify-end gap-2">
+        <button id="cancel-access" type="button" class="rounded-lg px-4 py-2 text-sm text-slate-400 hover:bg-white/5">Cancel</button>
+        <button type="submit" class="rounded-lg bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-300">Connect</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="/assets/app.js"></script>
+</body>
+</html>

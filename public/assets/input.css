@@ -1,0 +1,19 @@
+@import "tailwindcss";
+@source "../index.html";
+@source "./app.js";
+
+@theme {
+  --font-sans: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+@layer components {
+  .stat-card {
+    @apply rounded-2xl border border-white/10 bg-slate-900/60 p-4 shadow-lg shadow-black/10 backdrop-blur;
+  }
+  .stat-label {
+    @apply text-xs font-semibold uppercase tracking-[0.16em] text-slate-500;
+  }
+  .stat-value {
+    @apply mt-2 text-3xl font-semibold tracking-tight text-white;
+  }
+}

@@ -1,11 +1,19 @@
 import express from "express";
 import multer from "multer";
+import { createServer } from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
+import { Server as SocketIOServer } from "socket.io";
+import { requireApiKey, requireMonitorKey, isMonitorKeyValid } from "./auth.js";
+import { JobQueue } from "./queue.js";
 
 const MODEL_NAME = process.env.OLLAMA_MODEL || "gemma4:31b-cloud";
 const OLLAMA_HOST = (process.env.OLLAMA_HOST || "https://ollama.com").replace(/\/$/, "");
 const PORT = Number(process.env.PORT || 3000);
 const MAX_BATCH_SIZE = Number(process.env.MAX_BATCH_SIZE || 5);
+const QUEUE_CONCURRENCY = Number(process.env.QUEUE_CONCURRENCY || 2);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const REQUIRED_FIELDS = [
     "no",
@@ -94,6 +102,12 @@ function createBatchExtractionPrompt(documents, customPrompts) {
 }
 
 const app = express();
+const httpServer = createServer(app);
+const io = new SocketIOServer(httpServer);
+const queue = new JobQueue({
+    concurrency: QUEUE_CONCURRENCY,
+    retentionMs: Number(process.env.JOB_RETENTION_MS || 60 * 60 * 1000),
+});
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: {
@@ -220,70 +234,140 @@ async function extractMultipleDocuments(apiKey, imagesBase64, templates, customP
     return results;
 }
 
+function parseCustomPrompts(value) {
+    if (!value) return [];
+    try {
+        const parsed = typeof value === "string" ? JSON.parse(value) : value;
+        return Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+        return [String(value)];
+    }
+}
+
+function ollamaKey() {
+    if (!process.env.OLLAMA_API_KEY) {
+        throw new Error("OLLAMA_API_KEY is not configured on the server.");
+    }
+    return process.env.OLLAMA_API_KEY;
+}
+
+function jobResponse(job) {
+    return {
+        success: job.status !== "failed",
+        job,
+        statusUrl: `/api/v1/jobs/${ job.id }`,
+    };
+}
+
+function canReadJob(request, job) {
+    return job && request.apiUser?.keyId === job.ownerId;
+}
+
+async function sendQueuedResponse(request, response, job) {
+    if (request.query.wait !== "true") {
+        response.set("Location", `/api/v1/jobs/${ job.id }`);
+        return response.status(202).json(jobResponse(job));
+    }
+
+    const finished = await queue.waitFor(job.id);
+    return response.status(finished.status === "failed" ? 502 : 200).json(jobResponse(finished));
+}
+
+io.use((socket, next) => {
+    const key = socket.handshake.auth?.monitorKey || "";
+    if (!isMonitorKeyValid(key)) return next(new Error("unauthorized"));
+    next();
+});
+
+io.on("connection", (socket) => {
+    socket.emit("monitor:snapshot", { jobs: queue.list(), stats: queue.stats() });
+});
+
+queue.on("updated", (job) => io.emit("job:updated", job));
+queue.on("stats", (stats) => io.emit("queue:stats", stats));
+queue.on("removed", (id) => io.emit("job:removed", id));
+
+app.use("/assets", express.static(path.join(__dirname, "public/assets")));
+app.get("/monitor", (_request, response) => {
+    response.sendFile(path.join(__dirname, "public/index.html"));
+});
+
 app.get("/", (_request, response) => {
     response.json({
         name: "Tim Dev: Invoice OCR API - AI Cloud",
         status: "ok",
         endpoints: {
             single: "POST /api/v1/ocr/single",
-            batch: "POST /api/v1/ocr/batch"
+            batch: "POST /api/v1/ocr/batch",
+            job: "GET /api/v1/jobs/:id",
+            monitor: "GET /monitor",
         },
-        maxBatchSize: MAX_BATCH_SIZE
+        maxBatchSize: MAX_BATCH_SIZE,
+        queueConcurrency: QUEUE_CONCURRENCY,
     });
 });
 
-app.get("/health", (_request, response) => response.json({ status: "ok" }));
+app.get("/health", (_request, response) => response.json({
+    status: "ok",
+    queue: queue.stats(),
+}));
 
-app.post("/api/v1/ocr/single", upload.single("file"), async (request, response, next) => {
+app.get("/api/v1/jobs", requireApiKey, (request, response) => {
+    const jobs = queue.list().filter((job) => job.ownerId === request.apiUser.keyId);
+    response.json({ success: true, jobs });
+});
+
+app.get("/api/v1/jobs/:id", requireApiKey, (request, response) => {
+    const job = queue.get(request.params.id);
+    if (!canReadJob(request, job)) {
+        return response.status(404).json({ success: false, error: "Job not found." });
+    }
+    response.json(jobResponse(job));
+});
+
+app.get("/api/v1/monitor/jobs", requireMonitorKey, (_request, response) => {
+    response.json({ success: true, jobs: queue.list(), stats: queue.stats() });
+});
+
+app.post("/api/v1/ocr/single", requireApiKey, upload.single("file"), async (request, response, next) => {
     try {
-        const apiKey = request.query.apiKey || process.env.OLLAMA_API_KEY;
-        if (!apiKey) {
-            return response.status(400).json({
-                success: false,
-                error: "apiKey query parameter is required (or set OLLAMA_API_KEY).",
-            });
-        }
         if (!request.file) {
             return response.status(400).json({ success: false, error: "Image field 'file' is required." });
         }
 
         const imageBase64 = request.file.buffer.toString("base64");
-        const template = await filterImageTemplate(apiKey, imageBase64);
-        const data = await extractDocument(
-            apiKey,
-            imageBase64,
-            template,
-            request.body?.customPrompt,
-        );
-
-        // Check for missing fields
-        const missingFields = REQUIRED_FIELDS.filter((field) => !data[field]);
-
-        return response.json({
-            success: true,
-            result: {
-                data,
-                missingFields,
-                template,
-                filename: request.file.originalname,
-                customPromptUsed: Boolean(request.body?.customPrompt?.trim()),
+        const filename = request.file.originalname;
+        const customPrompt = request.body?.customPrompt;
+        const job = queue.add({
+            type: "single",
+            owner: request.apiUser,
+            filenames: [filename],
+            fileCount: 1,
+            run: async (progress) => {
+                const apiKey = ollamaKey();
+                const template = await filterImageTemplate(apiKey, imageBase64);
+                progress(50);
+                const data = await extractDocument(apiKey, imageBase64, template, customPrompt);
+                return {
+                    success: true,
+                    result: {
+                        data,
+                        missingFields: REQUIRED_FIELDS.filter((field) => !data[field]),
+                        template,
+                        filename,
+                        customPromptUsed: Boolean(customPrompt?.trim()),
+                    },
+                };
             },
         });
+        return await sendQueuedResponse(request, response, job);
     } catch (error) {
         next(error);
     }
 });
 
-app.post("/api/v1/ocr/batch", upload.array("files", MAX_BATCH_SIZE), async (request, response, next) => {
+app.post("/api/v1/ocr/batch", requireApiKey, upload.array("files", MAX_BATCH_SIZE), async (request, response, next) => {
     try {
-        const apiKey = request.query.apiKey || process.env.OLLAMA_API_KEY;
-        if (!apiKey) {
-            return response.status(400).json({
-                success: false,
-                error: "apiKey query parameter is required (or set OLLAMA_API_KEY).",
-            });
-        }
-
         const files = request.files;
         if (!files || files.length === 0) {
             return response.status(400).json({
@@ -299,57 +383,39 @@ app.post("/api/v1/ocr/batch", upload.array("files", MAX_BATCH_SIZE), async (requ
             });
         }
 
-        // Parse custom prompts
-        let customPrompts = [];
-        if (request.body?.customPrompts) {
-            try {
-                customPrompts = typeof request.body.customPrompts === 'string'
-                    ? JSON.parse(request.body.customPrompts)
-                    : request.body.customPrompts;
-
-                if (!Array.isArray(customPrompts)) {
-                    customPrompts = [request.body.customPrompts];
-                }
-            } catch {
-                customPrompts = [String(request.body.customPrompts)];
-            }
-        }
-
+        const customPrompts = parseCustomPrompts(request.body?.customPrompts);
         const imagesBase64 = files.map(file => file.buffer.toString("base64"));
-
-        // Step 1: Classify all templates
-        const templates = await filterMultipleImageTemplates(apiKey, imagesBase64);
-
-        // Step 2: Extract all documents
-        const dataArray = await extractMultipleDocuments(apiKey, imagesBase64, templates, customPrompts);
-
-        // Build results
-        const results = files.map((file, index) => ({
-            data: dataArray[index] || null,
-            missingFields: dataArray[index]
-                ? REQUIRED_FIELDS.filter((field) => !dataArray[index][field])
-                : REQUIRED_FIELDS,
-            template: templates[index] || null,
-            filename: file.originalname,
-            customPromptUsed: Boolean(customPrompts[index]?.trim()),
-        }));
-
-        const failures = results.filter(r => !r.data);
-        const successCount = results.filter(r => r.data).length;
-
-        return response.json({
-            success: failures.length === 0,
-            total: files.length,
-            successCount,
-            failureCount: failures.length,
-            results,
-            errors: failures.length > 0 ? failures.map((f, i) => ({
-                index: i,
-                filename: f.filename,
-                error: "Failed to extract data from document"
-            })) : undefined
+        const filenames = files.map((file) => file.originalname);
+        const job = queue.add({
+            type: "batch",
+            owner: request.apiUser,
+            filenames,
+            fileCount: files.length,
+            run: async (progress) => {
+                const apiKey = ollamaKey();
+                const templates = await filterMultipleImageTemplates(apiKey, imagesBase64);
+                progress(50);
+                const dataArray = await extractMultipleDocuments(apiKey, imagesBase64, templates, customPrompts);
+                const results = files.map((file, index) => ({
+                    data: dataArray[index] || null,
+                    missingFields: dataArray[index]
+                        ? REQUIRED_FIELDS.filter((field) => !dataArray[index][field])
+                        : REQUIRED_FIELDS,
+                    template: templates[index] || null,
+                    filename: file.originalname,
+                    customPromptUsed: Boolean(customPrompts[index]?.trim()),
+                }));
+                const failures = results.filter((result) => !result.data);
+                return {
+                    success: failures.length === 0,
+                    total: files.length,
+                    successCount: results.length - failures.length,
+                    failureCount: failures.length,
+                    results,
+                };
+            },
         });
-
+        return await sendQueuedResponse(request, response, job);
     } catch (error) {
         next(error);
     }
@@ -367,11 +433,13 @@ app.use((error, request, response, _next) => {
 const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMainModule) {
-    app.listen(PORT, "0.0.0.0", () => {
+    httpServer.listen(PORT, "0.0.0.0", () => {
         console.log(`OCR API listening on http://0.0.0.0:${ PORT }`);
+        console.log(`Monitoring UI: http://0.0.0.0:${ PORT }/monitor`);
         console.log(`Max batch size: ${ MAX_BATCH_SIZE }`);
+        console.log(`Queue concurrency: ${ QUEUE_CONCURRENCY }`);
     });
 }
 
-export { app, parseJSONResponse };
+export { app, httpServer, io, parseJSONResponse, queue };
 export default app;

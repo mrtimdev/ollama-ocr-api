@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { app, extractJson, normalizeResult } from "./app.js";
+import { JobQueue } from "./queue.js";
 
 test("health endpoint is accessible over HTTP", async () => {
   const server = app.listen(0, "127.0.0.1");
@@ -40,4 +41,23 @@ test("normalizeResult formats fields, date, and vehicle code", () => {
       vehicleCode: "3E-2929",
     },
   );
+});
+
+test("job queue processes work and returns the result", async () => {
+  const queue = new JobQueue({ concurrency: 1 });
+  const created = queue.add({
+    type: "single",
+    owner: { name: "tester", keyId: "abc123" },
+    filenames: ["invoice.jpg"],
+    fileCount: 1,
+    run: async (progress) => {
+      progress(50);
+      return { success: true, value: 42 };
+    },
+  });
+
+  const finished = await queue.waitFor(created.id);
+  assert.equal(finished.status, "completed");
+  assert.equal(finished.progress, 100);
+  assert.deepEqual(finished.result, { success: true, value: 42 });
 });
