@@ -24,7 +24,7 @@ function parseApiKeys(value = process.env.API_KEYS || "") {
 
 const configuredKeys = [
   ...parseApiKeys(),
-  ...parseApiKeys(process.env.SPRING_API_KEYS || "spring:KEY_FOR_TIM"),
+  ...parseApiKeys(process.env.SPRING_API_KEYS || "spring:OPS_KEY"),
 ];
 
 function readKey(request) {

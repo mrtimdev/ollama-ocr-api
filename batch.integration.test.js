@@ -42,14 +42,14 @@ test("Spring-style multipart batch request returns ordered OCR results and monit
   await listen(spring);
 
   const ollamaAddress = ollama.address();
-  process.env.OLLAMA_HOST = `http://127.0.0.1:${ollamaAddress.port}`;
+  process.env.OLLAMA_HOST = `http://127.0.0.1:${ ollamaAddress.port }`;
   process.env.OLLAMA_API_KEY = "test-ollama-key";
-  process.env.SPRING_API_KEYS = "spring:KEY_FOR_TIM";
-  process.env.SPRING_ACTION_KEY = "KEY_FOR_TIM";
+  process.env.SPRING_API_KEYS = "spring:OPS_KEY";
+  process.env.SPRING_ACTION_KEY = "OPS_KEY";
   process.env.SPRING_MONITOR_ACTION_URL =
-    `http://127.0.0.1:${spring.address().port}/api/internal/ocr-monitor/actions`;
+    `http://127.0.0.1:${ spring.address().port }/api/internal/ocr-monitor/actions`;
 
-  const module = await import(`./batch.js?integration=${Date.now()}`);
+  const module = await import(`./batch.js?integration=${ Date.now() }`);
   await listen(module.httpServer);
 
   try {
@@ -62,10 +62,10 @@ test("Spring-style multipart batch request returns ordered OCR results and monit
     form.append("springUsername", "user_1");
     form.append("springAction", "/api/scans");
 
-    const response = await fetch(`http://127.0.0.1:${apiAddress.port}/api/v1/ocr/batch?wait=true&apiKey=stale-provider-secret`, {
+    const response = await fetch(`http://127.0.0.1:${ apiAddress.port }/api/v1/ocr/batch?wait=true&apiKey=stale-provider-secret`, {
       method: "POST",
       headers: {
-        "X-API-Key": "KEY_FOR_TIM",
+        "X-API-Key": "OPS_KEY",
         apiKey: "provider-secret",
       },
       body: form,
@@ -82,8 +82,8 @@ test("Spring-style multipart batch request returns ordered OCR results and monit
 
     const jobId = body.job.id;
     const monitorResponse = await fetch(
-      `http://127.0.0.1:${apiAddress.port}/api/v1/monitor/jobs`,
-      { headers: { "X-API-Key": "KEY_FOR_TIM" } },
+      `http://127.0.0.1:${ apiAddress.port }/api/v1/monitor/jobs`,
+      { headers: { "X-API-Key": "OPS_KEY" } },
     );
     assert.equal(monitorResponse.status, 200);
     const monitorBody = await monitorResponse.json();
@@ -93,32 +93,32 @@ test("Spring-style multipart batch request returns ordered OCR results and monit
       [42],
     );
 
-    process.env.SPRING_BASE_URL = `http://127.0.0.1:${spring.address().port}`;
+    process.env.SPRING_BASE_URL = `http://127.0.0.1:${ spring.address().port }`;
     const scansResponse = await fetch(
-      `http://127.0.0.1:${apiAddress.port}/api/v1/monitor/jobs/${jobId}/scans`,
-      { headers: { "X-API-Key": "KEY_FOR_TIM" } },
+      `http://127.0.0.1:${ apiAddress.port }/api/v1/monitor/jobs/${ jobId }/scans`,
+      { headers: { "X-API-Key": "OPS_KEY" } },
     );
     assert.equal(scansResponse.status, 200);
     assert.equal((await scansResponse.json()).scans[0].id, 42);
 
     const imageResponse = await fetch(
-      `http://127.0.0.1:${apiAddress.port}/api/v1/monitor/jobs/${jobId}/scans/42/image`,
-      { headers: { "X-API-Key": "KEY_FOR_TIM" } },
+      `http://127.0.0.1:${ apiAddress.port }/api/v1/monitor/jobs/${ jobId }/scans/42/image`,
+      { headers: { "X-API-Key": "OPS_KEY" } },
     );
     assert.equal(imageResponse.status, 200);
     assert.equal(await imageResponse.text(), "image");
 
     const retryResponse = await fetch(
-      `http://127.0.0.1:${apiAddress.port}/api/v1/monitor/jobs/${jobId}/retry`,
-      { method: "POST", headers: { "X-Monitor-Key": "KEY_FOR_TIM" } },
+      `http://127.0.0.1:${ apiAddress.port }/api/v1/monitor/jobs/${ jobId }/retry`,
+      { method: "POST", headers: { "X-Monitor-Key": "OPS_KEY" } },
     );
     assert.equal(retryResponse.status, 200);
     assert.equal((await retryResponse.json()).result.queued, 1);
-    assert.equal(springActionKey, "KEY_FOR_TIM");
+    assert.equal(springActionKey, "OPS_KEY");
 
     const deleteResponse = await fetch(
-      `http://127.0.0.1:${apiAddress.port}/api/v1/monitor/jobs/${jobId}`,
-      { method: "DELETE", headers: { "X-API-Key": "KEY_FOR_TIM" } },
+      `http://127.0.0.1:${ apiAddress.port }/api/v1/monitor/jobs/${ jobId }`,
+      { method: "DELETE", headers: { "X-API-Key": "OPS_KEY" } },
     );
     assert.equal(deleteResponse.status, 200);
   } finally {

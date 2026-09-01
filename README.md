@@ -94,7 +94,7 @@ Configure the callback when Spring is not running on the default local port:
 ```env
 SPRING_MONITOR_ACTION_URL=http://127.0.0.1:8083/api/internal/ocr-monitor/actions
 SPRING_BASE_URL=http://127.0.0.1:8083
-SPRING_ACTION_KEY=KEY_FOR_TIM
+SPRING_ACTION_KEY=OPS_KEY
 ```
 
 `SPRING_ACTION_KEY` must match Spring's `app.ocr.access-key`/`OCR_ACCESS_KEY`.
@@ -188,3 +188,19 @@ sudo nano /etc/node-js-ocr-api/environment
 
 sudo chmod 600 /etc/node-js-ocr-api/environment
 sudo chown deverloper:deverloper /etc/node-js-ocr-api/environment
+
+
+sudo systemctl daemon-reload
+sudo systemctl restart node-js-ocr-api.service
+
+sudo systemctl start node-js-ocr-api.service
+sudo systemctl stop node-js-ocr-api.service
+sudo systemctl restart node-js-ocr-api.service
+sudo systemctl status node-js-ocr-api.service
+
+sudo journalctl -u node-js-ocr-api.service -f
+
+sudo nano /etc/systemd/system/node-js-ocr-api.service
+
+
+scp -P 22236 ./Archive.zip deverloper@45.201.196.19:~/node-js-ocr-api/

@@ -123,68 +123,128 @@ const upload = multer({
     },
 });
 
-async function chatWithImage(apiKey, imageBase64, prompt) {
-    const response = await fetch(`${ OLLAMA_HOST }/api/chat`, {
-        method: "POST",
-        headers: {
-            Authorization: `Bearer ${ apiKey }`,
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-            model: MODEL_NAME,
-            messages: [{ role: "user", content: prompt, images: [imageBase64] }],
-            stream: false,
-            options: { temperature: 0, num_ctx: 8192 },
-        }),
-        signal: AbortSignal.timeout(120_000),
-    });
-
-    if (!response.ok) {
-        const detail = await response.text();
-        throw new Error(`Ollama request failed (${ response.status }): ${ detail.slice(0, 500) }`);
-    }
-
-    const body = await response.json();
-    if (!body?.message?.content) throw new Error("Ollama returned an empty response.");
-    return body.message.content;
+function providerConfig(request) {
+    return {
+        apiKey: ollamaKey(request),
+        baseUrl: String(request.body?.aiBaseUrl || OLLAMA_HOST).replace(/\/$/, ""),
+        modelId: String(request.body?.modelId || MODEL_NAME).trim(),
+    };
 }
 
-async function chatWithMultipleImages(apiKey, imagesBase64, prompt) {
-    const response = await fetch(`${ OLLAMA_HOST }/api/chat`, {
-        method: "POST",
-        headers: {
-            Authorization: `Bearer ${ apiKey }`,
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-            model: MODEL_NAME,
+function imageMime(imageBase64) {
+    if (imageBase64.startsWith("iVBOR")) return "image/png";
+    if (imageBase64.startsWith("R0lGOD")) return "image/gif";
+    if (imageBase64.startsWith("UklGR")) return "image/webp";
+    return "image/jpeg";
+}
+
+async function chatWithImages(config, imagesBase64, prompt) {
+    const isAnthropic = config.baseUrl.includes("anthropic.com");
+    const isGemini = config.baseUrl.includes("generativelanguage.googleapis.com");
+    let url;
+    let headers = { "Content-Type": "application/json" };
+    let payload;
+
+    if (isAnthropic) {
+        url = config.baseUrl.endsWith("/v1/messages") ? config.baseUrl : `${ config.baseUrl }/v1/messages`;
+        headers = { ...headers, "x-api-key": config.apiKey, "anthropic-version": "2023-06-01" };
+        payload = {
+            model: config.modelId,
+            max_tokens: 4096,
+            temperature: 0,
+            messages: [{
+                role: "user", content: [
+                    { type: "text", text: prompt },
+                    ...imagesBase64.map(data => ({
+                        type: "image", source: {
+                            type: "base64", media_type: imageMime(data), data,
+                        }
+                    })),
+                ]
+            }],
+        };
+    } else if (isGemini) {
+        url = config.baseUrl.includes(":generateContent")
+            ? config.baseUrl
+            : `${ config.baseUrl }/models/${ encodeURIComponent(config.modelId) }:generateContent`;
+        url += `${ url.includes("?") ? "&" : "?" }key=${ encodeURIComponent(config.apiKey) }`;
+        payload = {
+            contents: [{
+                role: "user", parts: [
+                    { text: prompt },
+                    ...imagesBase64.map(data => ({ inlineData: { mimeType: imageMime(data), data } })),
+                ]
+            }],
+            generationConfig: { temperature: 0, responseMimeType: "application/json" },
+        };
+    } else if (config.baseUrl.includes("ollama.com") || config.baseUrl.endsWith("/api/chat")) {
+        url = config.baseUrl.endsWith("/api/chat") ? config.baseUrl : `${ config.baseUrl }/api/chat`;
+        headers.Authorization = `Bearer ${ config.apiKey }`;
+        payload = {
+            model: config.modelId,
             messages: [{ role: "user", content: prompt, images: imagesBase64 }],
             stream: false,
-            options: { temperature: 0, num_ctx: 16384 },
-        }),
-        signal: AbortSignal.timeout(180_000),
+            options: { temperature: 0, num_ctx: imagesBase64.length > 1 ? 16384 : 8192 },
+        };
+    } else {
+        url = config.baseUrl.endsWith("/v1") ? `${ config.baseUrl }/chat/completions` : config.baseUrl;
+        headers.Authorization = `Bearer ${ config.apiKey }`;
+        payload = {
+            model: config.modelId,
+            temperature: 0,
+            messages: [{
+                role: "user", content: [
+                    { type: "text", text: prompt },
+                    ...imagesBase64.map(data => ({
+                        type: "image_url", image_url: {
+                            url: `data:${ imageMime(data) };base64,${ data }`,
+                        }
+                    })),
+                ]
+            }],
+        };
+    }
+
+    const response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(imagesBase64.length > 1 ? 180_000 : 120_000),
     });
 
     if (!response.ok) {
         const detail = await response.text();
-        throw new Error(`Ollama batch request failed (${ response.status }): ${ detail.slice(0, 500) }`);
+        throw new Error(`AI provider request failed (${ response.status }): ${ detail.slice(0, 500) }`);
     }
 
     const body = await response.json();
-    if (!body?.message?.content) throw new Error("Ollama returned an empty response.");
-    return body.message.content;
+    const content = isAnthropic
+        ? body?.content?.[0]?.text
+        : isGemini
+            ? body?.candidates?.[0]?.content?.parts?.[0]?.text
+            : body?.message?.content || body?.choices?.[0]?.message?.content;
+    if (!content) throw new Error("AI provider returned an empty response.");
+    return content;
 }
 
-async function filterImageTemplate(apiKey, imageBase64) {
-    const raw = await chatWithImage(apiKey, imageBase64, TEMPLATE_CLASSIFICATION_PROMPT);
+async function chatWithImage(config, imageBase64, prompt) {
+    return chatWithImages(config, [imageBase64], prompt);
+}
+
+async function chatWithMultipleImages(config, imagesBase64, prompt) {
+    return chatWithImages(config, imagesBase64, prompt);
+}
+
+async function filterImageTemplate(config, imageBase64) {
+    const raw = await chatWithImage(config, imageBase64, TEMPLATE_CLASSIFICATION_PROMPT);
     const template = raw.trim();
     if (template === "GOODS TRANSFER NOTE") return "GOODS TRANSFER NOTE";
     if (template === "DELIVERY ORDER") return "DELIVERY ORDER";
     throw new Error(`Unsupported image template: ${ template }`);
 }
 
-async function filterMultipleImageTemplates(apiKey, imagesBase64) {
-    const raw = await chatWithMultipleImages(apiKey, imagesBase64, BATCH_CLASSIFICATION_PROMPT);
+async function filterMultipleImageTemplates(config, imagesBase64) {
+    const raw = await chatWithMultipleImages(config, imagesBase64, BATCH_CLASSIFICATION_PROMPT);
     const templates = JSON.parse(raw.trim());
 
     if (!Array.isArray(templates) || templates.length !== imagesBase64.length) {
@@ -229,20 +289,20 @@ function normalizeResult(data) {
     return normalized;
 }
 
-async function extractDocument(apiKey, imageBase64, template, customPrompt) {
+async function extractDocument(config, imageBase64, template, customPrompt) {
     const templatePrompt =
         template === "GOODS TRANSFER NOTE" ? GOODS_TRANSFER_NOTE_PROMPT : DELIVERY_ORDER_PROMPT;
-    const output = await chatWithImage(apiKey, imageBase64, buildPrompt(customPrompt, templatePrompt));
+    const output = await chatWithImage(config, imageBase64, buildPrompt(customPrompt, templatePrompt));
     return normalizeResult(parseJSONResponse(output));
 }
 
-async function extractMultipleDocuments(apiKey, imagesBase64, templates, customPrompts) {
+async function extractMultipleDocuments(config, imagesBase64, templates, customPrompts) {
     const prompt = createBatchExtractionPrompt(
         templates.map(t => ({ template: t })),
         customPrompts || []
     );
 
-    const output = await chatWithMultipleImages(apiKey, imagesBase64, prompt);
+    const output = await chatWithMultipleImages(config, imagesBase64, prompt);
     const results = parseJSONResponse(output);
 
     if (!Array.isArray(results) || results.length !== imagesBase64.length) {
@@ -292,7 +352,7 @@ function springBaseUrl() {
 }
 
 function springActionHeaders() {
-    return { "X-Monitor-Action-Key": process.env.SPRING_ACTION_KEY || "KEY_FOR_TIM" };
+    return { "X-Monitor-Action-Key": process.env.SPRING_ACTION_KEY || "OPS_KEY" };
 }
 
 async function requestSpringAction(job, action) {
@@ -538,7 +598,7 @@ app.post("/api/v1/ocr/single", requireApiKey, upload.single("file"), async (requ
         const imageBase64 = request.file.buffer.toString("base64");
         const filename = request.file.originalname;
         const customPrompt = request.body?.customPrompt;
-        const providerApiKey = ollamaKey(request);
+        const aiProvider = providerConfig(request);
         const job = queue.add({
             type: "single",
             owner: request.apiUser,
@@ -546,10 +606,9 @@ app.post("/api/v1/ocr/single", requireApiKey, upload.single("file"), async (requ
             fileCount: 1,
             metadata: parseSpringMetadata(request.body),
             run: async (progress) => {
-                const apiKey = providerApiKey;
-                const template = await filterImageTemplate(apiKey, imageBase64);
+                const template = await filterImageTemplate(aiProvider, imageBase64);
                 progress(50);
-                const data = await extractDocument(apiKey, imageBase64, template, customPrompt);
+                const data = await extractDocument(aiProvider, imageBase64, template, customPrompt);
                 return {
                     success: true,
                     result: {
@@ -588,7 +647,7 @@ app.post("/api/v1/ocr/batch", requireApiKey, upload.array("files", MAX_BATCH_SIZ
         const customPrompts = parseCustomPrompts(request.body?.customPrompts);
         const imagesBase64 = files.map(file => file.buffer.toString("base64"));
         const filenames = files.map((file) => file.originalname);
-        const providerApiKey = ollamaKey(request);
+        const aiProvider = providerConfig(request);
         const job = queue.add({
             type: "batch",
             owner: request.apiUser,
@@ -596,10 +655,9 @@ app.post("/api/v1/ocr/batch", requireApiKey, upload.array("files", MAX_BATCH_SIZ
             fileCount: files.length,
             metadata: parseSpringMetadata(request.body),
             run: async (progress) => {
-                const apiKey = providerApiKey;
-                const templates = await filterMultipleImageTemplates(apiKey, imagesBase64);
+                const templates = await filterMultipleImageTemplates(aiProvider, imagesBase64);
                 progress(50);
-                const dataArray = await extractMultipleDocuments(apiKey, imagesBase64, templates, customPrompts);
+                const dataArray = await extractMultipleDocuments(aiProvider, imagesBase64, templates, customPrompts);
                 const results = files.map((file, index) => ({
                     data: dataArray[index] || null,
                     missingFields: dataArray[index]

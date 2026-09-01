@@ -2,19 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 process.env.API_KEYS = "warehouse:warehouse-secret";
-process.env.SPRING_API_KEYS = "spring:KEY_FOR_TIM";
+process.env.SPRING_API_KEYS = "spring:OPS_KEY";
 process.env.MONITOR_API_KEY = "monitor-secret";
 
 const {
   authenticateMonitorKey,
   isMonitorKeyValid,
   readMonitorKey,
-} = await import(`./auth.js?test=${Date.now()}`);
+} = await import(`./auth.js?test=${ Date.now() }`);
 
 test("monitor accepts dedicated, API, and Spring keys", () => {
   assert.equal(isMonitorKeyValid("monitor-secret"), true);
   assert.equal(isMonitorKeyValid("warehouse-secret"), true);
-  assert.equal(isMonitorKeyValid("KEY_FOR_TIM"), true);
+  assert.equal(isMonitorKeyValid("OPS_KEY"), true);
   assert.equal(isMonitorKeyValid("wrong-key"), false);
   assert.equal(isMonitorKeyValid(""), false);
 });
@@ -35,7 +35,7 @@ test("monitor key can use monitor, API, bearer, or query transport", () => {
   });
 
   assert.equal(readMonitorKey(request({ "x-monitor-key": "monitor-secret" })), "monitor-secret");
-  assert.equal(readMonitorKey(request({ "x-api-key": "KEY_FOR_TIM" })), "KEY_FOR_TIM");
+  assert.equal(readMonitorKey(request({ "x-api-key": "OPS_KEY" })), "OPS_KEY");
   assert.equal(readMonitorKey(request({ authorization: "Bearer warehouse-secret" })), "warehouse-secret");
-  assert.equal(readMonitorKey(request({}, { apiKey: "KEY_FOR_TIM" })), "KEY_FOR_TIM");
+  assert.equal(readMonitorKey(request({}, { apiKey: "OPS_KEY" })), "OPS_KEY");
 });
