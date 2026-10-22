@@ -75,6 +75,12 @@ Open `http://localhost:3000/monitor`. When `MONITOR_API_KEY` is configured, use
 the **Monitor access** button to connect. The dashboard receives job metadata
 only; OCR results, image buffers, and credentials are not broadcast.
 
+To keep OCR remote while viewing its queue locally, set
+`REMOTE_MONITOR_URL=http://your-remote-ocr-host:port` in the local `.env` and
+restart Node. The local `/monitor` polls the remote queue every five seconds.
+Enter a key accepted by the remote server in Monitor access. Details, images,
+retry and delete are forwarded to that server; local OCR endpoints stay local.
+
 The monitor accepts the dedicated `MONITOR_API_KEY` or any key configured in
 `API_KEYS`/`SPRING_API_KEYS`. Monitoring REST calls may send the key in
 `X-Monitor-Key`, `X-API-Key`, or `Authorization: Bearer ...`.
@@ -98,6 +104,12 @@ SPRING_ACTION_KEY=OPS_KEY
 ```
 
 `SPRING_ACTION_KEY` must match Spring's `app.ocr.access-key`/`OCR_ACCESS_KEY`.
+Spring and Node default to `OPS_KEY`; when overriding it, set Spring's
+`OCR_ACCESS_KEY` and Node's `SPRING_API_KEYS=spring:<same-key>` and
+`SPRING_ACTION_KEY=<same-key>` together. Admin dashboard uploads use
+`POST /api/scans`; `GET /api/admin/scans` lists their saved scans.
+If only `SPRING_MONITOR_ACTION_URL` is set, scan previews use the same Spring
+base URL. An explicit `SPRING_BASE_URL` takes precedence.
 When Spring uses the default `127.0.0.1:8083`, the callback variables are
 optional. The monitor proxies linked scan details and images through the Node
 API, so the Spring action key is never exposed to the browser.

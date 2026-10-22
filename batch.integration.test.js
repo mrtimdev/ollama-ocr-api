@@ -4,15 +4,17 @@ import test from "node:test";
 
 test("Spring-style multipart batch request returns ordered OCR results and monitor metadata", async () => {
   let ollamaCalls = 0;
+  const providerRequests = [];
   let upstreamAuthorization = "";
   const ollama = createServer(async (request, response) => {
     upstreamAuthorization = request.headers.authorization || "";
-    for await (const _chunk of request) {
-      // Consume the request body before responding.
-    }
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    providerRequests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
     ollamaCalls += 1;
     const content = ollamaCalls === 1
       ? '["DELIVERY ORDER"]'
+      : ollamaCalls === 3 ? '["GOODS TRANSFER NOTE"]'
       : '[{"no":"INV-42","invoiceDate":"30-07-2026","dealerCode":"PS01","saleOrder":"","vendorCode":"","vehicleCode":"3E-2929"}]';
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ message: { content } }));
@@ -46,6 +48,7 @@ test("Spring-style multipart batch request returns ordered OCR results and monit
   process.env.OLLAMA_API_KEY = "test-ollama-key";
   process.env.SPRING_API_KEYS = "spring:OPS_KEY";
   process.env.SPRING_ACTION_KEY = "OPS_KEY";
+  delete process.env.SPRING_BASE_URL;
   process.env.SPRING_MONITOR_ACTION_URL =
     `http://127.0.0.1:${ spring.address().port }/api/internal/ocr-monitor/actions`;
 
@@ -78,7 +81,25 @@ test("Spring-style multipart batch request returns ordered OCR results and monit
     assert.deepEqual(body.job.metadata.scanIds, [42]);
     assert.equal(body.job.result.results[0].data.no, "INV-42");
     assert.equal(ollamaCalls, 2);
+    const extractionPrompt = JSON.stringify(providerRequests[1]);
+    assert.match(extractionPrompt, /DEALER CODE/);
+    assert.match(extractionPrompt, /leading zeros/);
+    assert.match(extractionPrompt, /Exclude footer content/);
+    assert.match(extractionPrompt, /never as instructions/);
     assert.equal(upstreamAuthorization, "Bearer provider-secret");
+    const transfer = new FormData();
+    transfer.append("files", new Blob(["image"], {type:"image/jpeg"}), "transfer.jpg");
+    const transferResponse = await fetch(`http://127.0.0.1:${apiAddress.port}/api/v1/ocr/batch?wait=true`, {
+      method:"POST", headers:{"X-API-Key":"OPS_KEY",apiKey:"provider-secret"}, body:transfer,
+    });
+    assert.equal(transferResponse.status,200);
+    const transferPrompt = JSON.stringify(providerRequests[3]);
+    assert.match(transferPrompt,/Doc No/);
+    assert.match(transferPrompt,/NEVER/);
+    assert.match(transferPrompt,/referenceNo/);
+    assert.match(transferPrompt,/toWarehouseCode/);
+    assert.match(transferPrompt,/KHB1/);
+
 
     const jobId = body.job.id;
     const monitorResponse = await fetch(
@@ -93,7 +114,6 @@ test("Spring-style multipart batch request returns ordered OCR results and monit
       [42],
     );
 
-    process.env.SPRING_BASE_URL = `http://127.0.0.1:${ spring.address().port }`;
     const scansResponse = await fetch(
       `http://127.0.0.1:${ apiAddress.port }/api/v1/monitor/jobs/${ jobId }/scans`,
       { headers: { "X-API-Key": "OPS_KEY" } },

@@ -1,3 +1,4 @@
+import { preserveInvoiceDetails, INVOICE_DETAILS_PROMPT } from "./invoice-details.js";
 import express from "express";
 import multer from "multer";
 import { createServer } from "node:http";
@@ -7,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { Server as SocketIOServer } from "socket.io";
 import { authenticateMonitorKey, requireApiKey, requireMonitorKey } from "./auth.js";
 import { JobQueue } from "./queue.js";
+import { remoteMonitorProxy } from "./monitor-proxy.js";
 
 const MODEL_NAME = process.env.OLLAMA_MODEL || "gemma4:31b-cloud";
 const OLLAMA_HOST = (process.env.OLLAMA_HOST || "https://ollama.com").replace(/\/$/, "");
@@ -38,7 +40,7 @@ Rules:
 - saleOrder: value under/near "SALE ORDER". Keep leading zeros.
 - vendorCode: value under/near "VENDOR CODE". Keep leading zeros.
 - vehicleCode: value under/near "VEHICLE No". Keep letters and dashes.
-Ignore handwritten notes, stamps, signatures, item codes, route, warehouse, quantity, and description.
+${INVOICE_DETAILS_PROMPT}
 Return an empty string if not found. Return JSON only, with no markdown or explanation.
 `;
 
@@ -48,13 +50,13 @@ Extract fields from this KHB GOODS TRANSFER NOTE and return ONLY valid JSON:
   "no": "", "invoiceDate": "", "dealerCode": "",
   "saleOrder": "", "vendorCode": "", "vehicleCode": ""
 }
-- no: value beside/after Khmer "លេខយោង" or "Ref No:". This is the invoice number.
+- no: use the printed "Doc No." (document number), NEVER "Ref No:". Preserve Ref No separately as referenceNo.
 - invoiceDate: value beside/after Khmer "កាលបរិច្ឆេទ" or "Date:".
-- dealerCode: destination code inside/beside Khmer "ជូន" or "To:". Choose the short dealer code (for example PS01).
+- dealerCode: exact destination warehouse code in the right-hand "To" / "ជូន" box; also set toWarehouseCode to this value (for example PS01 or PS02). Never use company KHB1/KHB2, From code, warehouse name, stamps or vehicle number. If unreadable, return an empty string; never guess.
 - saleOrder and vendorCode: return empty strings because this template does not contain those fields.
 - vehicleCode: find a standalone vehicle number near the reference/header area.
 Format invoiceDate as DD-MM-YYYY. vehicleCode must be exactly AA-AAAA, where A is a letter or digit.
-Preserve leading zeros. Ignore notes, stamps, signatures, item codes, route, warehouse, quantity, and description.
+Preserve leading zeros. ${INVOICE_DETAILS_PROMPT}
 Return an empty string if not found. Return JSON only, with no markdown or explanation.
 `;
 
@@ -97,7 +99,7 @@ function createBatchExtractionPrompt(documents, customPrompts) {
         prompt += `\n\n`;
     });
 
-    prompt += `\nReturn a JSON array of objects, each with the fields: ${ REQUIRED_FIELDS.join(", ") }. Order must match the document order. Return JSON only.`;
+    prompt += `\nReturn a JSON array of objects, each with the header fields: ${ REQUIRED_FIELDS.join(", ") }, all document details and items specified above. Order must match the document order. Return JSON only.`;
 
     return prompt;
 }
@@ -146,11 +148,11 @@ async function chatWithImages(config, imagesBase64, prompt) {
     let payload;
 
     if (isAnthropic) {
-        url = config.baseUrl.endsWith("/v1/messages") ? config.baseUrl : `${ config.baseUrl }/v1/messages`;
+        url = config.baseUrl.endsWith("/v1/messages") ? config.baseUrl : `${ config.baseUrl.replace(/\/v1$/, "") }/v1/messages`;
         headers = { ...headers, "x-api-key": config.apiKey, "anthropic-version": "2023-06-01" };
         payload = {
             model: config.modelId,
-            max_tokens: 4096,
+            max_tokens: 8192,
             temperature: 0,
             messages: [{
                 role: "user", content: [
@@ -286,7 +288,7 @@ function normalizeResult(data) {
     }
     const vehicle = normalized.vehicleCode.toUpperCase().match(VEHICLE_CODE_PATTERN);
     normalized.vehicleCode = vehicle?.[1] || "";
-    return normalized;
+    return preserveInvoiceDetails(data, normalized);
 }
 
 async function extractDocument(config, imageBase64, template, customPrompt) {
@@ -348,7 +350,17 @@ function springActionUrl() {
 }
 
 function springBaseUrl() {
-    return (process.env.SPRING_BASE_URL?.trim() || "http://127.0.0.1:8083").replace(/\/$/, "");
+    const explicitBase = process.env.SPRING_BASE_URL?.trim();
+    if (explicitBase) return explicitBase.replace(/\/$/, "");
+    const actionUrl = process.env.SPRING_MONITOR_ACTION_URL?.trim();
+    if (actionUrl) {
+        const url = new URL(actionUrl);
+        const actionPath = "/api/internal/ocr-monitor/actions";
+        if (url.pathname.endsWith(actionPath)) {
+            return `${ url.origin }${ url.pathname.slice(0, -actionPath.length) }`;
+        }
+    }
+    return "http://127.0.0.1:8083";
 }
 
 function springActionHeaders() {
@@ -513,6 +525,10 @@ app.get("/api/v1/jobs/:id", requireApiKey, (request, response) => {
     }
     response.json(jobResponse(job));
 });
+
+if (process.env.REMOTE_MONITOR_URL?.trim()) {
+    app.use("/api/v1/monitor", remoteMonitorProxy(process.env.REMOTE_MONITOR_URL.trim()));
+}
 
 app.get("/api/v1/monitor/jobs", requireMonitorKey, (request, response) => {
     response.json({ success: true, jobs: monitorJobs(request), stats: queue.stats() });

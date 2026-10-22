@@ -3,6 +3,7 @@ let stats = { total: 0, queued: 0, processing: 0, completed: 0, failed: 0, concu
 let socket;
 let pollingTimer;
 let monitorAccessGranted = false;
+let remoteMonitor = false;
 const selectedJobIds = new Set();
 
 const elements = {
@@ -282,6 +283,7 @@ async function loadMonitorSnapshot() {
     throw new Error(result.error || `Monitor access failed (${response.status}).`);
   }
   applySnapshot(result);
+  remoteMonitor = result.remoteMonitor === true;
 }
 
 function startMonitorPolling() {
@@ -317,6 +319,10 @@ async function connect() {
     return;
   }
 
+  if (remoteMonitor) {
+    startMonitorPolling();
+    return;
+  }
   socket = window.io({ auth: { monitorKey: localStorage.getItem("ocrMonitorKey") || "" } });
   socket.on("connect", () => {
     window.clearInterval(pollingTimer);

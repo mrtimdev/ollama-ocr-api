@@ -1,3 +1,4 @@
+import { preserveInvoiceDetails, INVOICE_DETAILS_PROMPT } from "./invoice-details.js";
 import express from "express";
 import multer from "multer";
 import { pathToFileURL } from "node:url";
@@ -30,7 +31,7 @@ Rules:
 - saleOrder: value under/near "SALE ORDER". Keep leading zeros.
 - vendorCode: value under/near "VENDOR CODE". Keep leading zeros.
 - vehicleCode: value under/near "VEHICLE No". Keep letters and dashes.
-Ignore handwritten notes, stamps, signatures, item codes, route, warehouse, quantity, and description.
+${INVOICE_DETAILS_PROMPT}
 Return an empty string if not found. Return JSON only, with no markdown or explanation.
 `;
 
@@ -46,7 +47,7 @@ Extract fields from this KHB GOODS TRANSFER NOTE and return ONLY valid JSON:
 - saleOrder and vendorCode: return empty strings because this template does not contain those fields.
 - vehicleCode: find a standalone vehicle number near the reference/header area.
 Format invoiceDate as DD-MM-YYYY. vehicleCode must be exactly AA-AAAA, where A is a letter or digit.
-Preserve leading zeros. Ignore notes, stamps, signatures, item codes, route, warehouse, quantity, and description.
+Preserve leading zeros. ${INVOICE_DETAILS_PROMPT}
 Return an empty string if not found. Return JSON only, with no markdown or explanation.
 `;
 
@@ -137,7 +138,7 @@ function normalizeResult(data) {
 
   const vehicle = normalized.vehicleCode.toUpperCase().match(VEHICLE_CODE_PATTERN);
   normalized.vehicleCode = vehicle?.[1] || "";
-  return normalized;
+  return preserveInvoiceDetails(data, normalized);
 }
 
 async function extractDocument(apiKey, imageBase64, template, customPrompt) {
