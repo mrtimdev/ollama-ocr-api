@@ -152,7 +152,7 @@ async function chatWithImages(config, imagesBase64, prompt) {
         headers = { ...headers, "x-api-key": config.apiKey, "anthropic-version": "2023-06-01" };
         payload = {
             model: config.modelId,
-            max_tokens: 8192,
+            max_tokens: 16384,
             temperature: 0,
             messages: [{
                 role: "user", content: [
